@@ -1,0 +1,9 @@
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore ML model files (optional)
+models_output/*.joblib
+
+# Ignore environment file
+.env

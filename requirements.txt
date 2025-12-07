@@ -6,3 +6,4 @@ matplotlib
 joblib
 requests
 openpyxl
+plotly==5.17.0
