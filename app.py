@@ -1,146 +1,237 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import json
 import joblib
-import requests
 import plotly.graph_objects as go
-
-st.set_page_config(page_title="Water Quality Dashboard", page_icon="💧", layout="wide")
-
-# -----------------------------
-# Config
-# -----------------------------
-TOKEN = "p4YhF8J1abcD93kL5pqQnnCdg4h29k7x"
-CSV_FILE = "sensor_data.csv"
-SAFETY_MODEL_PATH = "models_output/water_safety_rf.joblib"
-DISEASE_MODEL_PATH = "models_output/water_diseases_multi_rf.joblib"
-SCALER_PATH = "models_output/scaler.joblib"
-
+import os
+import requests
+from collections import deque
 
 # -----------------------------
-# Load ML models
+# Page Config
+# -----------------------------
+st.set_page_config(page_title="Smart Water Quality Dashboard", layout="wide")
+
+# -----------------------------
+# Model Paths
+# -----------------------------
+MODEL_DIR = "models_output"
+SAFETY_MODEL_PATH = os.path.join(MODEL_DIR, "water_safety_rf.joblib")
+DISEASE_MODEL_PATH = os.path.join(MODEL_DIR, "water_diseases_multi_rf.joblib")
+SCALER_PATH = os.path.join(MODEL_DIR, "scaler.joblib")
+FEATURES_PATH = os.path.join(MODEL_DIR, "feature_names.json")
+
+# -----------------------------
+# Safe Secret Loader
+# -----------------------------
+def get_secret(key: str) -> str:
+    try:
+        return st.secrets[key]
+    except Exception:
+        return ""
+
+# -----------------------------
+# Load ML Models
 # -----------------------------
 @st.cache_resource
 def load_models():
-    safety_clf = joblib.load(SAFETY_MODEL_PATH)
-    disease_clf = joblib.load(DISEASE_MODEL_PATH)
+    safety = joblib.load(SAFETY_MODEL_PATH)
+    disease = joblib.load(DISEASE_MODEL_PATH)
     scaler = joblib.load(SCALER_PATH)
-    return safety_clf, disease_clf, scaler
+    with open(FEATURES_PATH) as f:
+        feature_names = json.load(f)
+    return safety, disease, scaler, feature_names
 
-
-safety_model, disease_model, scaler = load_models()
-
-
-# -----------------------------
-# Water Safety Function (ML)
-# -----------------------------
-def predict_ml(ph, turbidity, temp):
-    # Prepare data as DataFrame for ML
-    X = pd.DataFrame([[ph, turbidity, temp]], columns=['pH', 'Turbidity (NTU)', 'Temperature'])
-
-    # Fill missing columns for ML
-    all_features = scaler.mean_.shape[0]  # number of features used in scaler
-    X_full = pd.DataFrame(np.zeros((1, all_features)), columns=[f"feat_{i}" for i in range(all_features)])
-    X_scaled = scaler.transform(X_full)  # scaled input
-
-    # Safety prediction
-    safety_pred = safety_model.predict(X_scaled)[0]
-
-    # Disease prediction
-    disease_pred = disease_model.predict(X_scaled)[0]
-
-    return safety_pred, disease_pred
-
+safety_model, disease_model, scaler, feature_names = load_models()
 
 # -----------------------------
-# UI Header
+# Session Trend History
+# -----------------------------
+if "history" not in st.session_state:
+    st.session_state.history = {
+        "pH": deque(maxlen=50),
+        "Turbidity": deque(maxlen=50),
+        "Temperature": deque(maxlen=50),
+        "TDS": deque(maxlen=50)
+    }
+
+# -----------------------------
+# Gauge Chart
+# -----------------------------
+def gauge(title, value, min_v, max_v):
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=value,
+        title={"text": title},
+        gauge={"axis": {"range": [min_v, max_v]}, "bar": {"color": "blue"}},
+    ))
+    fig.update_layout(height=250, margin=dict(l=20, r=20, t=30, b=0))
+    return fig
+
+# -----------------------------
+# Trend Chart
+# -----------------------------
+def plot_line(name, values):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(y=list(values), mode="lines+markers"))
+    fig.update_layout(title=name, height=250, margin=dict(l=20, r=20, t=40, b=10))
+    return fig
+
+# -----------------------------
+# Prediction Logic
+# -----------------------------
+def predict_quality(ph, turb, temp, tds):
+    row = pd.Series({
+        "pH": ph,
+        "Turbidity (NTU)": turb,
+        "Temperature (°C)": temp,
+        "TDS (mg/L)": tds
+    })
+
+    # Safe feature ordering
+    for col in feature_names:
+        if col not in row:
+            row[col] = 0
+    row = row[feature_names]
+
+    scaled = scaler.transform([row])
+
+    safe_pred = safety_model.predict(scaled)[0]
+    disease_pred = disease_model.predict(scaled)[0]
+
+    diseases = ["Diarrhea", "Cholera", "Typhoid", "Gastroenteritis", "Chemical_Illness"]
+    detected = [diseases[i] for i, v in enumerate(disease_pred) if v == 1]
+
+    return safe_pred, detected
+
+# -----------------------------
+# Header
 # -----------------------------
 st.title("💧 Smart Water Quality Dashboard")
-st.markdown("Enter readings or fetch live sensor values and get ML predictions for water safety and diseases.")
+st.markdown("Manual and live IoT sensor inputs with ML predictions.")
 
 # -----------------------------
-# Input Section
+# Manual Sensor Input
 # -----------------------------
-st.subheader("📟 Enter Sensor Readings Manually")
-col1, col2, col3 = st.columns(3)
+st.subheader("📟 Manual Sensor Input")
 
+col1, col2, col3, col4 = st.columns(4)
 with col1:
-    ph = st.number_input("pH Value", min_value=0.0, max_value=14.0, value=7.0, step=0.1)
+    ph = st.number_input("pH", 0.0, 14.0, 7.0, 0.1)
 with col2:
-    turbidity = st.number_input("Turbidity (NTU)", min_value=0.0, max_value=100.0, value=2.0, step=0.1)
+    turb = st.number_input("Turbidity (NTU)", 0.0, 100.0, 2.0, 0.1)
 with col3:
-    temp = st.number_input("Temperature (°C)", min_value=0.0, max_value=100.0, value=25.0, step=0.1)
+    temp = st.number_input("Temperature (°C)", 0.0, 100.0, 25.0, 0.1)
+with col4:
+    tds = st.number_input("TDS (mg/L)", 0.0, 2000.0, 300.0, 10.0)
+
+if st.button("🔍 Predict Water Quality"):
+    safe, diseases = predict_quality(ph, turb, temp, tds)
+
+    # Save to history
+    st.session_state.history["pH"].append(ph)
+    st.session_state.history["Turbidity"].append(turb)
+    st.session_state.history["Temperature"].append(temp)
+    st.session_state.history["TDS"].append(tds)
+
+    # Gauges
+    g1, g2, g3, g4 = st.columns(4)
+    g1.plotly_chart(gauge("pH", ph, 0, 14))
+    g2.plotly_chart(gauge("Turbidity", turb, 0, 100))
+    g3.plotly_chart(gauge("Temperature °C", temp, 0, 50))
+    g4.plotly_chart(gauge("TDS (mg/L)", tds, 0, 2000))
+
+    st.subheader("📌 Water Safety")
+    st.success("✅ SAFE" if safe == 1 else "🚨 NOT SAFE")
+
 
 # -----------------------------
-# ML Prediction
-# -----------------------------
-if st.button("Check Water Quality & Predict"):
-    try:
-        # Predict using ML
-        safety_pred, disease_pred = predict_ml(ph, turbidity, temp)
-
-        # Safety output
-        if safety_pred == 1:
-            st.success("✅ Water is SAFE for drinking (ML Prediction)")
-        else:
-            st.error("❌ Water is NOT SAFE (ML Prediction)")
-
-        # Disease output
-        diseases = ["Diarrhea", "Cholera", "Typhoid", "Gastroenteritis", "Chemical_Illness"]
-        disease_dict = {d: disease_pred[i] for i, d in enumerate(diseases)}
-        st.subheader("⚠️ Predicted Diseases Risk")
-        for d, val in disease_dict.items():
-            if val == 1:
-                st.warning(f"- {d} risk detected")
-            else:
-                st.info(f"- {d}: no risk")
-
-        # Send safety to Blynk
-        try:
-            requests.get(f"https://blynk.cloud/external/api/update?token={TOKEN}&v2={safety_pred}")
-            st.info("📡 Safety prediction sent to Blynk")
-        except:
-            st.warning("⚠ Could not send to Blynk")
-
-        # -----------------------------
-        # Bar Chart Visualization
-        # -----------------------------
-        st.subheader("📊 Sensor Levels")
-        sensors = ["pH", "Turbidity", "Temperature"]
-        values = [ph, turbidity, temp]
-        colors = ["#636EFA", "#EF553B", "#00CC96"]
-
-        fig = go.Figure(go.Bar(x=sensors, y=values, marker_color=colors, text=values, textposition='auto'))
-        fig.update_layout(title="Current Sensor Levels", yaxis_title="Value", xaxis_title="Sensor")
-        st.plotly_chart(fig, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"❌ Prediction failed: {e}")
-
-# -----------------------------
-# Fetch Live Sensor from Blynk
+# Trends
 # -----------------------------
 st.divider()
-st.subheader("📡 Fetch Live Sensor from Blynk (V1)")
+st.subheader("📈 Live Trends")
 
-if st.button("Fetch from Blynk"):
-    try:
-        value = requests.get(f"https://blynk.cloud/external/api/get?token={TOKEN}&v1").text
-        st.info(f"🔹 Live Sensor Value: {value}")
+t1, t2, t3, t4 = st.columns(4)
+t1.plotly_chart(plot_line("Temperature", st.session_state.history["Temperature"]))
+t2.plotly_chart(plot_line("TDS", st.session_state.history["TDS"]))
+t3.plotly_chart(plot_line("Turbidity", st.session_state.history["Turbidity"]))
+t4.plotly_chart(plot_line("pH", st.session_state.history["pH"]))
 
-        # Optionally parse CSV-like string if Blynk sends multiple readings
-        # For example: "7.2,2.5,25"
-        parts = value.split(",")
-        if len(parts) == 3:
-            ph, turbidity, temp = map(float, parts)
-            st.success(f"Using fetched values: pH={ph}, Turbidity={turbidity}, Temp={temp}")
+# -----------------------------
+# Live Blynk Data
+# -----------------------------
+st.divider()
+st.subheader("📡 Blynk Live Sensor Readings")
 
-            # Auto-predict ML on fetched data
-            safety_pred, disease_pred = predict_ml(ph, turbidity, temp)
-            if safety_pred == 1:
-                st.success("✅ Water is SAFE (ML Prediction)")
-            else:
-                st.error("❌ Water is NOT SAFE (ML Prediction)")
+BLYNK_TOKEN = "4Y-YI7wxxHsSIrK3FCTZFDScQwq62XTH"
 
-    except:
-        st.error("❌ Failed to fetch from Blynk")
+
+if st.button("📥 Fetch Live Data (Secret Token)"):
+    if BLYNK_TOKEN == "":
+        st.warning("No secret token found. Use manual token field below.")
+    else:
+        try:
+            url = f"https://blynk.cloud/external/api/get?token={BLYNK_TOKEN}&v1&v2&v3&v4&format=json"
+            res = requests.get(url, timeout=5).json()
+
+            ph_val = float(res.get("v4"))
+            turb_val = float(res.get("v3"))
+            temp_val = float(res.get("v1"))
+            tds_val = float(res.get("v2"))
+
+            safe, diseases = predict_quality(ph_val, turb_val, temp_val, tds_val)
+
+            # Save history
+            st.session_state.history["pH"].append(ph_val)
+            st.session_state.history["Turbidity"].append(turb_val)
+            st.session_state.history["Temperature"].append(temp_val)
+            st.session_state.history["TDS"].append(tds_val)
+
+            g1, g2, g3, g4 = st.columns(4)
+            g1.plotly_chart(gauge("pH", ph_val, 0, 14))
+            g2.plotly_chart(gauge("Turbidity", turb_val, 0, 100))
+            g3.plotly_chart(gauge("Temperature °C", temp_val, 0, 50))
+            g4.plotly_chart(gauge("TDS (mg/L)", tds_val, 0, 2000))
+
+            st.success("✅ SAFE" if safe == 1 else "🚨 NOT SAFE")
+
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
+
+# -----------------------------
+# Manual Token Fetch
+# -----------------------------
+token = st.text_input("Enter Blynk Token (optional):")
+
+if st.button("📥 Fetch Live Data (Manual Token)"):
+    if token.strip() == "":
+        st.error("Please enter a valid token.")
+    else:
+        try:
+            url = f"https://blynk.cloud/external/api/get?token={token}&v1&v2&v3&v4&format=json"
+            res = requests.get(url, timeout=5).json()
+
+            ph_val = float(res.get("v4"))
+            turb_val = float(res.get("v3"))
+            temp_val = float(res.get("v1"))
+            tds_val = float(res.get("v2"))
+
+            safe, diseases = predict_quality(ph_val, turb_val, temp_val, tds_val)
+
+            # Save history
+            st.session_state.history["pH"].append(ph_val)
+            st.session_state.history["Turbidity"].append(turb_val)
+            st.session_state.history["Temperature"].append(temp_val)
+            st.session_state.history["TDS"].append(tds_val)
+
+            g1, g2, g3, g4 = st.columns(4)
+            g1.plotly_chart(gauge("pH", ph_val, 0, 14))
+            g2.plotly_chart(gauge("Turbidity", turb_val, 0, 100))
+            g3.plotly_chart(gauge("Temperature °C", temp_val, 0, 50))
+            g4.plotly_chart(gauge("TDS (mg/L)", tds_val, 0, 2000))
+
+            st.success("✅ SAFE" if safe == 1 else "🚨 NOT SAFE")
+
+        except Exception as e:
+            st.error(f"❌ Error: {e}")

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from utils.is_water_safe import simple_is_water_safe, advanced_is_water_safe
 
-TOKEN = "YOUR_BLYNK_TOKEN"  # replace with your token
+TOKEN = "4Y-YI7wxxHsSIrK3FCTZFDScQwq62XTH"  # replace with your token
 BASE_URL = "https://blynk.cloud/external/api"
 
 MODEL_DIR = "models_output"
